@@ -1,0 +1,215 @@
+import RPi.GPIO as GPIO
+import time
+import os
+import requests
+from datetime import datetime
+from picamera2 import Picamera2
+from twilio.rest import Client
+import cloudinary
+import cloudinary.uploader
+
+# ---------------- ROBOFLOW SETTINGS ----------------
+API_KEY = "YOUR_ROBOFLOW_API_KEY"
+MODEL_ID = "insect_detect_classification_v2/1"
+
+# ---------------- TWILIO SETTINGS ----------------
+ACCOUNT_SID = "YOUR_TWILIO_SID"
+AUTH_TOKEN = "YOUR_TWILIO_AUTH_TOKEN"
+FROM_NUMBER = "+1234567890"
+TO_NUMBER = "+91XXXXXXXXXX"
+
+twilio_client = Client(ACCOUNT_SID, AUTH_TOKEN)
+
+# ---------------- CLOUDINARY SETTINGS ----------------
+cloudinary.config(
+    cloud_name="YOUR_CLOUD_NAME",
+    api_key="YOUR_API_KEY",
+    api_secret="YOUR_API_SECRET"
+)
+
+# ---------------- FLASK SERVER ENDPOINT ----------------
+ENDPOINT = "http://10.88.90.99:5000/data/ingest"
+
+# ---------------- GPIO SETUP ----------------
+GPIO.setmode(GPIO.BCM)
+TRIG = 11
+ECHO = 12
+LED = 17
+
+GPIO.setup(TRIG, GPIO.OUT)
+GPIO.setup(ECHO, GPIO.IN)
+GPIO.setup(LED, GPIO.OUT)
+
+# ---------------- CAMERA SETUP ----------------
+picam2 = Picamera2()
+picam2.start()
+
+# ---------------- IMAGE FOLDER ----------------
+folder = "/home/pi/images/"
+os.makedirs(folder, exist_ok=True)
+
+# ---------------- COUNTER ----------------
+insect_counts = {}
+
+# ---------------- DISTANCE FUNCTION ----------------
+def get_distance():
+    GPIO.output(TRIG, False)
+    time.sleep(0.2)
+
+    GPIO.output(TRIG, True)
+    time.sleep(0.00001)
+    GPIO.output(TRIG, False)
+
+    pulse_start = time.time()
+    pulse_end = time.time()
+    timeout = time.time() + 1
+
+    while GPIO.input(ECHO) == 0:
+        pulse_start = time.time()
+        if pulse_start > timeout:
+            return None
+
+    while GPIO.input(ECHO) == 1:
+        pulse_end = time.time()
+        if pulse_end > timeout:
+            return None
+
+    duration = pulse_end - pulse_start
+    distance = duration * 17150
+    return round(distance, 2)
+
+# ---------------- CLOUDINARY UPLOAD ----------------
+def upload_to_cloudinary(image_path):
+    try:
+        response = cloudinary.uploader.upload(image_path)
+        return response.get("secure_url")
+    except Exception as e:
+        print("Cloudinary Error:", e)
+        return None
+
+# ---------------- SEND SMS ----------------
+def send_sms(message, image_url=None):
+    try:
+        if image_url:
+            twilio_client.messages.create(
+                body=message,
+                from_=FROM_NUMBER,
+                to=TO_NUMBER,
+                media_url=[image_url]
+            )
+        else:
+            twilio_client.messages.create(
+                body=message,
+                from_=FROM_NUMBER,
+                to=TO_NUMBER
+            )
+        print("SMS sent!")
+    except Exception as e:
+        print("SMS Error:", e)
+
+# ---------------- SEND TO FLASK SERVER ----------------
+def send_to_dashboard(insect, count, confidence, image_url):
+    try:
+        data = {
+            "device_id": "f4a8d369-1eaa-48d4-810d-866e69feade3",
+            "timestamp": datetime.utcnow().isoformat(),
+            "insect_species": insect,
+            "count": count,
+            "confidence": confidence,
+            "image_url": image_url
+        }
+
+        headers = {
+            "Content-Type": "application/json"
+        }
+
+        response = requests.post(ENDPOINT, json=data, headers=headers)
+
+        print("Flask Status:", response.status_code)
+        print("Flask Response:", response.text)
+
+    except Exception as e:
+        print("Flask Error:", e)
+
+# ---------------- INSECT DETECTION ----------------
+def detect_insect(image_path):
+    global insect_counts
+
+    try:
+        with open(image_path, "rb") as img:
+            response = requests.post(
+                f"https://serverless.roboflow.com/{MODEL_ID}?api_key={API_KEY}",
+                files={"file": img}
+            )
+
+        if response.status_code != 200:
+            print("Roboflow Error:", response.text)
+            return
+
+        result = response.json()
+        predictions = result.get("predictions", [])
+
+        if predictions:
+            top = predictions[0]
+            insect = top.get("class", "Unknown")
+            confidence = top.get("confidence", 0)
+
+            insect_counts[insect] = insect_counts.get(insect, 0) + 1
+            count = insect_counts[insect]
+
+            print(f"\nDetected: {insect} ({confidence:.2f})")
+            print(f"Total {insect}: {count}")
+
+            # Upload image
+            image_url = upload_to_cloudinary(image_path)
+
+            # Send to Flask
+            send_to_dashboard(insect, count, confidence, image_url)
+
+            # Send SMS
+            sms_text = f"""Insect Detected!
+Type: {insect}
+Confidence: {confidence:.2f}
+Count: {count}
+Image: {image_url}"""
+
+            send_sms(sms_text, image_url)
+
+            # Delete local image to save storage
+            if image_url:
+                os.remove(image_path)
+
+        else:
+            print("No insect detected")
+
+    except Exception as e:
+        print("Detection Error:", e)
+
+# ---------------- MAIN LOOP ----------------
+last_sms_time = 0
+
+try:
+    while True:
+        GPIO.output(LED, True)
+
+        distance = get_distance()
+        print("Distance:", distance, "cm")
+
+        if distance and distance < 20:
+            print("Object detected! Capturing image...")
+
+            filename = folder + f"image_{int(time.time())}.jpg"
+            picam2.capture_file(filename)
+
+            print("Image saved:", filename)
+
+            detect_insect(filename)
+
+        time.sleep(1)
+
+except KeyboardInterrupt:
+    print("Program stopped")
+
+finally:
+    GPIO.cleanup()
+    picam2.stop()
