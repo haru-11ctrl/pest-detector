@@ -42,6 +42,3 @@ An intelligent pest detection system using Raspberry Pi, Pi Camera, and machine 
 * https://github.com/dddjjjbbb/Grunz/blob/main/main.py# 
 
 
-## 🤝 Contributors
-
-* Harshitha
