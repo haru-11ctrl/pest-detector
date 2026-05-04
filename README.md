@@ -45,5 +45,3 @@ An intelligent pest detection system using Raspberry Pi, Pi Camera, and machine 
 ## 🤝 Contributors
 
 * Harshitha
-
-* https://unix.stackexchange.com/questions/479/keep-processes-running-after-ssh-session-disconnects
